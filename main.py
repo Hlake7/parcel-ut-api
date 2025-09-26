@@ -166,6 +166,10 @@ KML_HEADER = (
       '<Pair><key>normal</key><styleUrl>#parcel-normal</styleUrl></Pair>'
       '<Pair><key>highlight</key><styleUrl>#parcel-highlight</styleUrl></Pair>'
     '</StyleMap>'
+# Hide children in Places tree for speed
+'<Style id="container-hide-children">'
+      '<ListStyle><listItemType>checkHideChildren</listItemType></ListStyle>'
+    '</Style>'
 )
 KML_FOOTER = '</Document></kml>'
 
@@ -173,49 +177,42 @@ KML_FOOTER = '</Document></kml>'
 def ring_to_kml_coords(coords):
     return " ".join(f"{c[0]},{c[1]},0" for c in coords)
 
-def feature_to_kml(feature, county_name: str, valuation_tmpl: str | None, gis_link_tmpl: str | None):
+def feature_to_kml(feature, county_name: str, valuation_tmpl: str | None, gis_link_tmpl: str | None, zlabel: str | None = None):
     props = feature.get("properties") or {}
     geom  = feature.get("geometry") or {}
     gtype = geom.get("type")
 
-    # Prefer common parcel/serial fields
     raw_val = (
-        props.get("PARCEL_ID")
-        or props.get("PARCELNO")
-        or props.get("PARCEL")
-        or props.get("SERIAL_NUM")
-        or props.get("SERIALNUM")
-        or props.get("OBJECTID")
-        or ""
+        props.get("PARCEL_ID") or props.get("PARCELNO") or props.get("PARCEL")
+        or props.get("SERIAL_NUM") or props.get("SERIALNUM") or props.get("OBJECTID") or ""
     )
     raw = html.escape(str(raw_val))
 
     def fmt_pid(pid: str) -> str:
-        # Human-friendly dashed form for 14-digit ids
         digits = "".join(ch for ch in str(pid) if ch.isdigit())
         return f"{digits[0:2]}-{digits[2:4]}-{digits[4:7]}-{digits[7:10]}-{digits[10:14]}" if len(digits) == 14 else pid
 
-    # --- new: helpers for numbers/currency ---
     def _to_num(x):
-        try:
-            return float(str(x).replace(",", ""))
-        except Exception:
-            return None
+        try: return float(str(x).replace(",", ""))
+        except Exception: return None
 
     def _fmt_money(x):
-        n = _to_num(x)
-        return f"${n:,.0f}" if n is not None else None
+        n = _to_num(x);  return f"${n:,.0f}" if n is not None else None
 
     def _fmt_acres(x):
-        n = _to_num(x)
-        return f"{n:,.2f}" if n is not None else None
+        n = _to_num(x);  return f"{n:,.2f}" if n is not None else None
 
-    # --- new: pull extra fields (robust fallbacks) ---
+    # Common LIR fields (owner varies by county; try several)
     addr = props.get("PARCEL_ADD") or props.get("SITUS_ADDR") or props.get("SITE_ADDR") or props.get("SITEADD") or props.get("SITUSADDR")
     city = props.get("PARCEL_CITY") or props.get("SITUS_CITY") or props.get("CITY")
     acres = props.get("PARCEL_ACRES") or props.get("ACRES") or props.get("GIS_ACRES")
     mv_total = props.get("TOTAL_MKT_VALUE") or props.get("TOTAL_MARKET_VALUE") or props.get("MARKET_VALUE")
     mv_land  = props.get("LAND_MKT_VALUE")  or props.get("LAND_MARKET_VALUE")
+
+    owner = (
+        props.get("OWNER") or props.get("OWNER1") or props.get("OWNER_NAME") or
+        props.get("OWNERNME1") or props.get("OWNERNAM1") or props.get("TAXPAYER")
+    )
 
     pretty = fmt_pid(raw)
 
@@ -226,7 +223,6 @@ def feature_to_kml(feature, county_name: str, valuation_tmpl: str | None, gis_li
             for r in poly[1:]
         )
 
-        # Balloon content
         parts = [f"<b>Parcel:</b> "]
         if valuation_tmpl:
             parts.append(f"<a href='{valuation_tmpl.format(pid=raw)}' target='_blank'>{pretty}</a>")
@@ -235,20 +231,20 @@ def feature_to_kml(feature, county_name: str, valuation_tmpl: str | None, gis_li
         if gis_link_tmpl:
             parts.append(f"<br/><a href='{gis_link_tmpl.format(pid=raw)}' target='_blank'>{county_name} GIS</a>")
 
-        # --- new: extra lines ---
         if addr or city:
-            safe_addr = html.escape(addr) if addr else ""
-            safe_city = (", " + html.escape(city)) if city else ""
-            parts.append(f"<br/><b>Address:</b> {safe_addr}{safe_city}")
+            parts.append(f"<br/><b>Address:</b> {html.escape(addr) if addr else ''}{', ' + html.escape(city) if city else ''}")
         fa = _fmt_acres(acres)
-        if fa:
-            parts.append(f"<br/><b>Acres:</b> {fa}")
+        if fa: parts.append(f"<br/><b>Acres:</b> {fa}")
         fm = _fmt_money(mv_total)
-        if fm:
-            parts.append(f"<br/><b>Market Value (Total):</b> {fm}")
-        fm_land = _fmt_money(mv_land)
-        if fm_land:
-            parts.append(f"<br/><b>Market Value (Land):</b> {fm_land}")
+        if fm: parts.append(f"<br/><b>Assessed Total Value:</b> {fm}")
+        fml = _fmt_money(mv_land)
+        if fml: parts.append(f"<br/><b>Assessed Land Value:</b> {fml}")
+
+        if owner:
+            parts.append(f"<br/><b>Owner:</b> {html.escape(str(owner))}")
+
+        if zlabel:
+            parts.append(f"<br/><b>Zoning:</b> {html.escape(zlabel)}")
 
         return (
             f"<Placemark>"
@@ -388,6 +384,7 @@ def kml(
     kml_body = (
         f"<Folder id='{FOLDER_ID}'>"
         f"<open>0</open>"
+        f"<styleUrl>#container-hide-children</styleUrl>"
         f"<name>{folder_name} — {len(placemarks)}</name>"
         f"{''.join(placemarks)}"
         f"</Folder>"
@@ -422,7 +419,7 @@ def menu(base: str | None = None):
             f"<Link>"
             f"<href>{href}</href>"
             f"<viewRefreshMode>onStop</viewRefreshMode>"
-            f"<viewRefreshTime>0.5</viewRefreshTime>" # refresh quickly after you stop panning
+            f"<viewRefreshTime>1.5</viewRefreshTime>" # refresh quickly after you stop panning
             f"<viewFormat>&amp;bbox=[bboxWest],[bboxSouth],[bboxEast],[bboxNorth]"
             f"&amp;eyeAlt=[eyeAltitude]</viewFormat>"
             f"</Link>"
